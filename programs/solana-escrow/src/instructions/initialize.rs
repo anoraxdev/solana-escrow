@@ -1,33 +1,48 @@
 use anchor_lang::prelude::*;
 
-use crate::{constants::*, state::Counter};
+use crate::{constants::ESCROW_SEED, state::Escrow};
 
 #[derive(Accounts)]
+#[instruction(offer_id: u64)]
 pub struct Initialize<'info> {
     #[account(mut)]
-    pub payer: Signer<'info>,
+    pub seller: Signer<'info>,
+
     #[account(
         init,
-        payer = payer,
-        space = 8 + Counter::INIT_SPACE,
-        seeds = [COUNTER_SEED],
+        payer = seller,
+        space = 8 + Escrow::INIT_SPACE,
+        seeds = [
+            ESCROW_SEED,
+            seller.key().as_ref(),
+            offer_id.to_le_bytes().as_ref()
+        ],
         bump
     )]
-    pub counter: Account<'info, Counter>,
+    pub escrow: Account<'info, Escrow>,
+
     pub system_program: Program<'info, System>,
 }
 
-pub fn handle_initialize(ctx: Context<Initialize>) -> Result<()> {
-    ctx.accounts.counter.count = 0;
-    ctx.accounts.counter.authority = ctx.accounts.payer.key();
+pub fn handle_initialize(
+    ctx: Context<Initialize>,
+    offer_id: u64,
+    sol_amount: u64,
+    usdc_amount: u64,
+    usdc_mint: Pubkey,
+) -> Result<()> {
+    let escrow = &mut ctx.accounts.escrow;
 
-    let cpi_accounts = anchor_lang::system_program::Transfer {
-        from: ctx.accounts.payer.to_account_info(),
-        to: ctx.accounts.counter.to_account_info(),
-    };
-    let cpi_ctx = CpiContext::new(anchor_lang::system_program::ID, cpi_accounts);
-    anchor_lang::system_program::transfer(cpi_ctx, HELLO_WORLD_LAMPORTS)?;
+    escrow.seller = ctx.accounts.seller.key();
+    escrow.buyer = None;
+    escrow.usdc_mint = usdc_mint;
+    escrow.offer_id = offer_id;
+    escrow.sol_amount = sol_amount;
+    escrow.usdc_amount = usdc_amount;
+    escrow.bump = ctx.bumps.escrow;
+    escrow.status = 0;
 
-    msg!("Hello, world! Counter initialized");
+    msg!("Escrow offer initialized");
+
     Ok(())
 }
