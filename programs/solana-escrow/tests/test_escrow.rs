@@ -1,8 +1,8 @@
 use anchor_lang::{
+    prelude::Pubkey,
     AccountDeserialize,
     InstructionData,
     ToAccountMetas,
-    prelude::Pubkey,
 };
 
 use litesvm::LiteSVM;
@@ -19,9 +19,18 @@ use solana_escrow::{
     ID,
 };
 
-#[test]
-fn test_initialize_and_deposit_sol() {
-    // 1. Initialize LiteSVM and load our compiled program.
+struct TestContext {
+    svm: LiteSVM,
+    seller: Keypair,
+    escrow_pda: Pubkey,
+    usdc_mint: Pubkey,
+    offer_id: u64,
+    sol_amount: u64,
+    usdc_amount: u64,
+}
+
+// Creates an isolated test environment.
+fn setup() -> TestContext {
     let mut svm = LiteSVM::new();
 
     let program_path = concat!(
@@ -29,30 +38,19 @@ fn test_initialize_and_deposit_sol() {
         "/../../target/deploy/solana_escrow.so"
     );
 
-    svm.add_program_from_file(
-        ID,
-        program_path,
-    )
-    .expect("Failed to load escrow program");
+    svm.add_program_from_file(ID, program_path)
+        .expect("Failed to load escrow program");
 
-    // 2. Create and fund the seller.
     let seller = Keypair::new();
 
-    svm.airdrop(
-        &seller.pubkey(),
-        10_000_000_000,
-    )
-    .expect("Failed to fund seller");
+    svm.airdrop(&seller.pubkey(), 10_000_000_000)
+        .expect("Failed to fund seller");
 
-    // 3. Define the offer.
-    let offer_id: u64 = 1;
-    let sol_amount: u64 = 2_000_000_000; // 2 SOL
-    let usdc_amount: u64 = 300_000_000;  // 300 USDC (6 decimals)
-
-    // A placeholder mint for now.
+    let offer_id:u64 = 1;
+    let sol_amount = 2_000_000_000;
+    let usdc_amount = 300_000_000;
     let usdc_mint = Pubkey::new_unique();
 
-    // 4. Derive the escrow PDA.
     let (escrow_pda, _) = Pubkey::find_program_address(
         &[
             b"escrow",
@@ -62,112 +60,258 @@ fn test_initialize_and_deposit_sol() {
         &ID,
     );
 
-    // 5. Construct the initialize instruction.
+    TestContext {
+        svm,
+        seller,
+        escrow_pda,
+        usdc_mint,
+        offer_id,
+        sol_amount,
+        usdc_amount,
+    }
+}
+
+// Initializes the escrow offer.
+fn initialize_offer(ctx: &mut TestContext) {
     let initialize_ix = Instruction {
         program_id: ID,
         accounts: accounts::Initialize {
-            seller: seller.pubkey(),
-            escrow: escrow_pda,
+            seller: ctx.seller.pubkey(),
+            escrow: ctx.escrow_pda,
             system_program: anchor_lang::system_program::ID,
         }
         .to_account_metas(None),
 
         data: instruction::Initialize {
-            offer_id,
-            sol_amount,
-            usdc_amount,
-            usdc_mint,
+            offer_id: ctx.offer_id,
+            sol_amount: ctx.sol_amount,
+            usdc_amount: ctx.usdc_amount,
+            usdc_mint: ctx.usdc_mint,
         }
         .data(),
     };
 
-    // 6. Submit the initialize transaction.
-    let initialize_message = Message::new(
+    let message = Message::new(
         &[initialize_ix],
-        Some(&seller.pubkey()),
+        Some(&ctx.seller.pubkey()),
     );
 
-    let initialize_tx = Transaction::new(
-        &[&seller],
-        initialize_message,
-        svm.latest_blockhash(),
+    let transaction = Transaction::new(
+        &[&ctx.seller],
+        message,
+        ctx.svm.latest_blockhash(),
     );
 
-    svm.send_transaction(initialize_tx)
+    ctx.svm
+        .send_transaction(transaction)
         .expect("Initialize transaction failed");
+}
 
-    // 7. Read and verify the escrow account.
-    let escrow_account = svm
-        .get_account(&escrow_pda)
-        .expect("Escrow account not found");
-
-    let mut account_data = escrow_account.data.as_slice();
-
-    let escrow = Escrow::try_deserialize(&mut account_data)
-        .expect("Failed to deserialize escrow");
-
-    assert_eq!(escrow.seller, seller.pubkey());
-    assert_eq!(escrow.buyer, None);
-    assert_eq!(escrow.usdc_mint, usdc_mint);
-    assert_eq!(escrow.offer_id, offer_id);
-    assert_eq!(escrow.sol_amount, sol_amount);
-    assert_eq!(escrow.usdc_amount, usdc_amount);
-    assert_eq!(escrow.status, 0);
-
-    println!("Escrow initialized successfully");
-
-    // 8. Record the escrow balance before depositing.
-    let balance_before = escrow_account.lamports;
-
-    // 9. Construct the deposit_sol instruction.
-    let deposit_ix = Instruction {
+// Constructs a deposit instruction.
+fn create_deposit_instruction(
+    seller: Pubkey,
+    escrow_pda: Pubkey,
+) -> Instruction {
+    Instruction {
         program_id: ID,
         accounts: accounts::DepositSol {
-            seller: seller.pubkey(),
+            seller,
             escrow: escrow_pda,
             system_program: anchor_lang::system_program::ID,
         }
         .to_account_metas(None),
 
         data: instruction::DepositSol {}.data(),
-    };
+    }
+}
 
-    // 10. Submit the deposit transaction.
-    let deposit_message = Message::new(
+// Executes a SOL deposit.
+fn deposit_sol(ctx: &mut TestContext) {
+    let deposit_ix = create_deposit_instruction(
+        ctx.seller.pubkey(),
+        ctx.escrow_pda,
+    );
+
+    let message = Message::new(
         &[deposit_ix],
-        Some(&seller.pubkey()),
+        Some(&ctx.seller.pubkey()),
     );
 
-    let deposit_tx = Transaction::new(
-        &[&seller],
-        deposit_message,
-        svm.latest_blockhash(),
+    let transaction = Transaction::new(
+        &[&ctx.seller],
+        message,
+        ctx.svm.latest_blockhash(),
     );
 
-    svm.send_transaction(deposit_tx)
+    ctx.svm
+        .send_transaction(transaction)
         .expect("Deposit transaction failed");
+}
 
-    // 11. Verify the resulting escrow balance.
-    let escrow_account_after = svm
-        .get_account(&escrow_pda)
-        .expect("Escrow account not found after deposit");
+// Reads and deserializes the escrow account.
+fn read_escrow(ctx: &TestContext) -> Escrow {
+    let account = ctx
+        .svm
+        .get_account(&ctx.escrow_pda)
+        .expect("Escrow account not found");
 
-    let balance_after = escrow_account_after.lamports;
+    let mut data = account.data.as_slice();
+
+    Escrow::try_deserialize(&mut data)
+        .expect("Failed to deserialize escrow")
+}
+
+#[test]
+fn test_initialize_and_deposit_sol() {
+    let mut ctx = setup();
+
+    initialize_offer(&mut ctx);
+
+    let escrow = read_escrow(&ctx);
+
+    assert_eq!(escrow.seller, ctx.seller.pubkey());
+    assert_eq!(escrow.buyer, None);
+    assert_eq!(escrow.usdc_mint, ctx.usdc_mint);
+    assert_eq!(escrow.offer_id, ctx.offer_id);
+    assert_eq!(escrow.sol_amount, ctx.sol_amount);
+    assert_eq!(escrow.usdc_amount, ctx.usdc_amount);
+    assert_eq!(escrow.status, 0);
+
+    println!("Escrow initialized successfully");
+
+    let balance_before = ctx
+        .svm
+        .get_account(&ctx.escrow_pda)
+        .unwrap()
+        .lamports;
+
+    deposit_sol(&mut ctx);
+
+    let balance_after = ctx
+        .svm
+        .get_account(&ctx.escrow_pda)
+        .unwrap()
+        .lamports;
 
     assert_eq!(
         balance_after - balance_before,
-        sol_amount,
+        ctx.sol_amount,
         "Escrow did not receive the expected SOL amount"
     );
 
-    // 12. Verify the updated escrow state.
-    let mut account_data_after = escrow_account_after.data.as_slice();
+    let escrow = read_escrow(&ctx);
 
-    let escrow_after = Escrow::try_deserialize(&mut account_data_after)
-        .expect("Failed to deserialize escrow after deposit");
-
-    assert_eq!(escrow_after.status, 1);
+    assert_eq!(escrow.status, 1);
 
     println!("SOL deposited successfully");
-    println!("Escrow balance increased by {} lamports", sol_amount);
+}
+
+#[test]
+fn test_unauthorized_deposit() {
+    let mut ctx = setup();
+
+    initialize_offer(&mut ctx);
+
+    let balance_before = ctx
+        .svm
+        .get_account(&ctx.escrow_pda)
+        .unwrap()
+        .lamports;
+
+    let attacker = Keypair::new();
+
+    ctx.svm
+        .airdrop(&attacker.pubkey(), 1_000_000_000)
+        .expect("Failed to fund unauthorized wallet");
+
+    let deposit_ix = create_deposit_instruction(
+        attacker.pubkey(),
+        ctx.escrow_pda,
+    );
+
+    let message = Message::new(
+        &[deposit_ix],
+        Some(&attacker.pubkey()),
+    );
+
+    let transaction = Transaction::new(
+        &[&attacker],
+        message,
+        ctx.svm.latest_blockhash(),
+    );
+
+    assert!(
+        ctx.svm.send_transaction(transaction).is_err(),
+        "Unauthorized deposit should fail"
+    );
+
+    println!("Unauthorized deposit correctly rejected");
+
+    let escrow_account = ctx
+        .svm
+        .get_account(&ctx.escrow_pda)
+        .expect("Escrow account not found");
+
+    assert_eq!(
+        escrow_account.lamports,
+        balance_before,
+        "Escrow balance changed after an unauthorized deposit"
+    );
+}
+
+#[test]
+fn test_duplicate_deposit() {
+    let mut ctx = setup();
+
+    initialize_offer(&mut ctx);
+    deposit_sol(&mut ctx);
+
+    let balance_before = ctx
+        .svm
+        .get_account(&ctx.escrow_pda)
+        .unwrap()
+        .lamports;
+
+    let deposit_ix = create_deposit_instruction(
+        ctx.seller.pubkey(),
+        ctx.escrow_pda,
+    );
+
+    let message = Message::new(
+        &[deposit_ix],
+        Some(&ctx.seller.pubkey()),
+    );
+
+    let transaction = Transaction::new(
+        &[&ctx.seller],
+        message,
+        ctx.svm.latest_blockhash(),
+    );
+
+    assert!(
+        ctx.svm.send_transaction(transaction).is_err(),
+        "Duplicate deposit should fail"
+    );
+
+    println!("Duplicate deposit correctly rejected");
+
+    let balance_after = ctx
+        .svm
+        .get_account(&ctx.escrow_pda)
+        .unwrap()
+        .lamports;
+
+    assert_eq!(
+        balance_after,
+        balance_before,
+        "Escrow balance changed after a failed deposit"
+    );
+
+    let escrow = read_escrow(&ctx);
+
+    assert_eq!(
+        escrow.status,
+        1,
+        "Escrow status changed after a failed deposit"
+    );
 }
